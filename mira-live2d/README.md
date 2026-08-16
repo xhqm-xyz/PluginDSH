@@ -73,3 +73,6 @@
 - 模型结束本轮（agent 回到 `idle`）→ `mood: idle`，`idleClearMs` 后恢复默认表情
 - 也可用 `mira_set_mood` 手动设置
 
+## 第三方组件
+
+`assets/lib/` 捆绑了 PixiJS（MIT）、pixi-live2d-display（MIT）与 Live2D Cubism Core（专有，Live2D Software License Agreement）。各组件的版权与许可证全文见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
