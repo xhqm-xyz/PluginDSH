@@ -6,8 +6,8 @@
 
 本插件以链接方式装入 `web` profile：
 
-- 源码目录：`D:\WorkSpace\dsh-live2d`
-- 链接：`C:\Users\xhqm\.dsh\profiles\node_modules\mira-live2d` → `D:\WorkSpace\dsh-live2d`（junction）
+- 源码目录：`DeepSeek\WorkSpace\dsh-live2d`
+- 链接：`C:\Users\xhqm\.dsh\profiles\node_modules\mira-live2d` → `DeepSeek\WorkSpace\dsh-live2d`（junction）
 - 行配置：`C:\Users\xhqm\.dsh\profiles\web\cordis.patch.yml` 中的 `mira-live2d` 行
 
 改动源码后重启 `dsh web` 生效。
@@ -73,17 +73,3 @@
 - 模型结束本轮（agent 回到 `idle`）→ `mood: idle`，`idleClearMs` 后恢复默认表情
 - 也可用 `mira_set_mood` 手动设置
 
-## 其他可封装的 MCP 功能（建议）
-
-见会话中的答复，或按需追加到 `lib/index.js` 的 `registerTools`：
-
-- `mira_upload_model`（zip 部署模型）/ `mira_delete_model`
-- `mira_screenshot`（canvas 截图返回给模型）
-- `mira_record_video` / `mira_take_photo`
-- `mira_set_canvas`（改画布尺寸 / 位置 / 缩放）
-- `mira_tts_voices`（列出 TTS 音色）
-- `mira_speak_stream`（边生成边朗读）
-- `mira_random_expression` / `mira_random_motion`
-- `mira_schedule_expression`（定时切表情）
-- `mira_notify`（系统通知）
-- `mira_presence`（是否有页面在线）
