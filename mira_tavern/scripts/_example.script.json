@@ -1,0 +1,58 @@
+{
+  "schema": "tavern.script/1",
+  "id": "example-tavern",
+  "title": "雨夜酒馆",
+  "subtitle": "tavern 剧本格式演示",
+  "description": "一个演示「酒馆」剧本 JSON 格式的迷你三幕剧。",
+  "narrator": { "name": "旁白", "voice": "" },
+  "characters": [
+    {
+      "id": "keeper",
+      "name": "老板娘",
+      "color": "#e0a458",
+      "voice": "",
+      "avatar": "",
+      "description": "酒馆的老板娘，沉稳寡言，看惯了雨夜来客。"
+    },
+    {
+      "id": "traveler",
+      "name": "旅人",
+      "color": "#6fa8dc",
+      "voice": "",
+      "avatar": "",
+      "description": "深夜推门而入的陌生旅人。"
+    }
+  ],
+  "scenes": [
+    {
+      "id": "s1",
+      "title": "第一幕 · 推门",
+      "stage": "深夜，暴雨，酒馆内暖黄灯火摇曳。",
+      "narration": "门被猛地推开，风雨裹着一个身影涌了进来。",
+      "lines": [
+        { "speaker": "keeper", "text": "这么晚了，还赶路？", "action": "头也不抬地擦着杯子" },
+        { "speaker": "traveler", "text": "讨一杯热酒，避一避雨。", "action": "抖落斗篷上的雨水" }
+      ]
+    },
+    {
+      "id": "s2",
+      "title": "第二幕 · 空座",
+      "stage": "柜台前，只有两三个空位，烛火把影子拉得很长。",
+      "narration": "旅人在角落坐下，把一枚旧铜币按在吧台上。",
+      "lines": [
+        { "speaker": "keeper", "text": "这店里，不收铜币。", "action": "抬眼，语气平淡" },
+        { "speaker": "traveler", "text": "那就收下这个问题的答案。", "action": "压低声音" }
+      ]
+    },
+    {
+      "id": "s3",
+      "title": "第三幕 · 雨停",
+      "stage": "雨声渐歇，天边透出一点微光。",
+      "narration": "老板娘倒满一杯酒，推向旅人，转身望向窗外。",
+      "lines": [
+        { "speaker": "keeper", "text": "雨快停了，喝了这杯，就上路吧。", "action": "声音很轻" },
+        { "speaker": "narrator", "text": "旅人沉默地饮尽，起身，门在身后轻轻合上。", "action": "" }
+      ]
+    }
+  ]
+}

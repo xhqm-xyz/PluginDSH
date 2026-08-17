@@ -1,0 +1,28 @@
+{
+  "name": "mira_tavern",
+  "version": "1.0.0",
+  "description": "DSH 酒馆插件：悬浮面板式剧本演绎（剧情）框架，通用剧本 JSON 加载 + 逐幕演绎 + OpenAI 兼容 TTS 配音 + 模型可调用工具（tavern_*）",
+  "type": "module",
+  "main": "lib/index.js",
+  "files": [
+    "lib/index.js",
+    "assets",
+    "scripts"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "tavern",
+    "roleplay",
+    "scripted-drama",
+    "tts"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xhqm-xyz/PluginDSH.git",
+    "directory": "mira_tavern"
+  }
+}

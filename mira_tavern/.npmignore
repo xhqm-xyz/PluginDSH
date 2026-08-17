@@ -1,0 +1,4 @@
+# 剧本数据为内容资产：默认不发包，仅保留示例与格式文档。
+scripts/*
+!scripts/README.md
+!scripts/_example.script.json
