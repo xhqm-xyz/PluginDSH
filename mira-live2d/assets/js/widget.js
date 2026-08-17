@@ -128,7 +128,7 @@
     async function setModel(entry, name) {
       const gen = ++modelGen
       if (!app) {
-        app = new PIXI.Application({ view: canvas, autoStart: true, transparent: true, width: W, height: H, resolution: (window.devicePixelRatio || 1), autoDensity: true })
+        app = new PIXI.Application({ view: canvas, autoStart: true, transparent: true, width: W, height: H, resolution: (window.devicePixelRatio || 1) * 3, autoDensity: true })
       }
       let next
       try {
