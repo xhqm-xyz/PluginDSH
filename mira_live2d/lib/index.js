@@ -10,9 +10,8 @@
  * 仅依赖 Node 内置模块，不依赖任何运行时第三方包，保证链接安装时无需解析依赖。
  */
 
-import { readFile } from 'node:fs/promises'
-import { readdir } from 'node:fs/promises'
-import { join, dirname, extname, resolve, sep, normalize, relative } from 'node:path'
+import { readFile, readdir } from 'node:fs/promises'
+import { join, dirname, extname, resolve, sep, normalize } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const name = 'mira_live2d'
@@ -499,8 +498,8 @@ async function handleApi(pathname, req, res) {
   }
 
   if (sub === 'command-result' && req.method === 'POST') {
-    const body = await readBody(req)
-    // 结果仅用于日志，不阻塞指令队列
+    // 结果仅用于日志（当前未记录），消费请求体避免连接挂起
+    await readBody(req)
     return sendJson(res, 200, { ok: true })
   }
 
