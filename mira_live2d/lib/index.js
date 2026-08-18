@@ -1,4 +1,4 @@
-﻿/**
+/**
  * mira_live2d — DSH 主机端插件
  * 职责：
  *   1. 注册模型可调用的 MCP 风格工具（ctx.tools）

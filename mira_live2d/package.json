@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "mira_live2d",
   "version": "2.0.0",
   "description": "DSH Live2D 看板娘插件：会话界面浮层（拖拽/滚轮缩放/右键表情菜单）+ 模型可说话（OpenAI/阿里 TTS）+ MCP 工具（状态/切模型/表情动画开关/思考等待表情）",
