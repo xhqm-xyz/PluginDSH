@@ -102,11 +102,19 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-napcat.ps1 -Restart
 
 > ⚠️ **App Store 版 QQ 需要「App 管理」权限才能打入口补丁**：App Store 下载的 QQ 包体带 `com.apple.macl` 保护，root 也无法直接改其 `package.json`（会报 `Operation not permitted`）。请先在「系统设置 → 隐私与安全性 → App 管理」里授权你的终端（或直接运行官方安装器 `~/Downloads/NapCatInstaller.app` 完成补丁）。一键脚本会检测该错误并提示。
 
-### 第 2 步：把插件链接进 web profile
+### 第 2 步：获取源码并链接进 web profile
+
+先获取插件源码（本插件位于 PluginDSH 仓库的 `mira_qqbot/` 子目录）：
+
+```bash
+git clone https://github.com/xhqm-xyz/PluginDSH.git
+```
+
+再把 `mira_qqbot/` 目录链接进 web profile：
 
 ```bash
 cd ~/.dsh/profiles/web
-pnpm add mira_qqbot@link:<本插件所在目录的绝对路径>
+pnpm add mira_qqbot@link:<PluginDSH 目录下的 mira_qqbot 绝对路径>
 ```
 
 > 提示：如果之前链接过，先 `pnpm remove mira_qqbot` 再重新 add。
