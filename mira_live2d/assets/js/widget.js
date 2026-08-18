@@ -1,4 +1,4 @@
-/* mira-live2d 前端看板娘
+﻿/* mira_live2d 前端看板娘
  * 由主机端通过 tapIndex 注入 index.html，随每个会话的对话界面加载。
  * 支持：拖拽移动、滚轮缩放、右键表情菜单、语音/气泡、指令轮询、状态上报、思考/等待表情联动。
  */
@@ -27,13 +27,18 @@
     root.id = 'mira-l2d-root'
     root.innerHTML =
       '<canvas id="mira-l2d-canvas"></canvas>' +
-      '<div id="mira-l2d-bubble" class="mira-hide"></div>' +
-      '<div id="mira-l2d-menu" class="mira-hide"></div>'
+      '<div id="mira-l2d-bubble" class="mira-hide"></div>'
     document.body.appendChild(root)
+
+    // 菜单独立挂到 body：root 上设了 touch-action:none，若菜单作为其子元素，
+    // 触摸/滚轮会被 root 拦截而无法滚动菜单；脱离 root 后 menu 自身可正常滚动。
+    const menu = document.createElement('div')
+    menu.id = 'mira-l2d-menu'
+    menu.className = 'mira-hide'
+    document.body.appendChild(menu)
 
     const canvas = $('mira-l2d-canvas')
     const bubble = $('mira-l2d-bubble')
-    const menu = $('mira-l2d-menu')
 
     /* ── 状态 ── */
     const state = {
@@ -49,6 +54,8 @@
       expressions: [],
       motions: [],
     }
+    // 可叠加表情栈：name -> { motion, active }（开关-* / 动作-* 等非互斥表情）
+    const stackActive = new Map()
     let persona = Object.assign(
       { thinking: { expression: '', bubble: '' }, awaiting: { expression: '', bubble: '' }, idleClearMs: 3200 },
       config.persona || {}
@@ -95,7 +102,12 @@
     // 初始位置：右下 / 左下
     const savedPos = safeGet(POS_KEY)
     const savedScale = safeGet(SCALE_KEY)
-    if (savedScale && typeof savedScale === 'number') viewScale = savedScale
+    const isMobile = ('ontouchstart' in window) || (navigator.maxTouchPoints || 0) > 0
+    if (savedScale && typeof savedScale === 'number') {
+      viewScale = savedScale
+    } else if (isMobile && config.mobileScale) {
+      viewScale = Math.max(0.25, Math.min(3, config.mobileScale / 100))
+    }
     root.style.width = W * viewScale + 'px'
     root.style.height = H * viewScale + 'px'
     canvas.style.transform = 'scale(' + viewScale + ')'
@@ -160,6 +172,10 @@
       model.y = H
       state.model = name
       state.entry = entry
+      stackActive.clear()
+      try {
+        model.internalModel.on('beforeModelUpdate', applyStackedExpressions)
+      } catch (e) {}
       refreshLists()
       if (state.animationsEnabled) {
         try {
@@ -235,14 +251,93 @@
     }
 
     /* ── 表情 / 动作 ── */
-    function setExpression(name) {
+    function getExpressionManager() {
+      try {
+        return model && model.internalModel && model.internalModel.motionManager
+          ? model.internalModel.motionManager.expressionManager
+          : null
+      } catch (e) {
+        return null
+      }
+    }
+
+    function resetExpression() {
+      // model.expression(null) 会被 setExpression(null) 当成「找不到该表情」直接返回 false，
+      // 因此必须调用 expressionManager.resetExpression() 才能真正恢复默认表情。
+      const em = getExpressionManager()
+      if (em && typeof em.resetExpression === 'function') {
+        try {
+          em.resetExpression()
+          if (em.defaultExpression) em.currentExpression = em.defaultExpression
+        } catch (e) {}
+      } else if (model) {
+        try {
+          model.expression(null)
+        } catch (e) {}
+      }
+      state.currentExpression = null
+      // 默认表情 = 恢复初始状态：同时清空所有叠加表情
+      for (const item of stackActive.values()) item.active = false
+      pushState()
+    }
+
+    async function getExpressionMotion(name) {
+      const em = getExpressionManager()
+      if (!em || typeof em.loadExpression !== 'function') return null
+      const idx = (em.definitions || []).findIndex((d) => d && d.Name === name)
+      if (idx < 0) return null
+      try {
+        return await em.loadExpression(idx)
+      } catch (e) {
+        return null
+      }
+    }
+
+    async function toggleStackExpression(name) {
+      const item = stackActive.get(name)
+      if (item) {
+        item.active = !item.active
+        pushState()
+        return
+      }
+      const motion = await getExpressionMotion(name)
+      if (!motion) return
+      stackActive.set(name, { motion, active: true })
+      pushState()
+    }
+
+    function applyStackedExpressions() {
+      if (!model || stackActive.size === 0) return
+      let core
+      try {
+        core = model.internalModel && model.internalModel.coreModel
+      } catch (e) {
+        return
+      }
+      if (!core) return
+      for (const item of stackActive.values()) {
+        if (!item.active || !item.motion) continue
+        try {
+          // doUpdateParameters(model, entry, weight, time)：按 Blend 把该表情参数叠加到 coreModel。
+          // 该钩子挂在内置模型的 beforeModelUpdate 事件上，正好在 coreModel.update() 推送前执行。
+          item.motion.doUpdateParameters(core, null, 1, 0)
+        } catch (e) {}
+      }
+    }
+
+    function setExpression(name, stack) {
       if (!model) return
       if (!state.expressionsEnabled) return
+      if (!name) {
+        resetExpression()
+        return
+      }
+      if (stack) {
+        toggleStackExpression(name)
+        return
+      }
       try {
-        if (!name) {
-          model.expression(null)
-          state.currentExpression = null
-        } else if (state.expressions.indexOf(name) >= 0) {
+        if (state.expressions.indexOf(name) >= 0) {
           model.expression(name)
           state.currentExpression = name
         }
@@ -279,10 +374,7 @@
         idleTimer = setTimeout(() => {
           if (state.mood !== 'idle') return
           if (state.expressionsEnabled) {
-            try {
-              model && model.expression(null)
-            } catch (e) {}
-            state.currentExpression = null
+            resetExpression()
           }
           hideBubble()
         }, persona.idleClearMs || 0)
@@ -293,9 +385,13 @@
     /* ── 指令执行 ── */
     async function execCommand(cmd) {
       switch (cmd.action) {
-        case 'expression':
-          setExpression(cmd.value || '')
+        case 'expression': {
+          const v = cmd.value
+          const nm = (v && typeof v === 'object') ? (v.name || '') : (v || '')
+          const stack = !!(v && typeof v === 'object' && v.stack)
+          setExpression(nm, stack)
           break
+        }
         case 'motion':
           playMotion(cmd.value)
           break
@@ -321,10 +417,8 @@
           break
         case 'set_expressions':
           state.expressionsEnabled = !!cmd.value
-          if (!state.expressionsEnabled && model) {
-            try {
-              model.expression(null)
-            } catch (e) {}
+          if (!state.expressionsEnabled) {
+            resetExpression()
           }
           pushState()
           break
@@ -347,6 +441,9 @@
     /* ── 指令轮询 ── */
     // 消费位置持久化：刷新后从上次位置继续，不重放历史指令（避免重新触发模型切换等副作用）
     const CMD_ID_KEY = 'mira_l2d_cmd_id'
+    // 一次性事件指令：页面刚加载的首轮轮询只重建「状态型」指令，不重放这些瞬时指令。
+    // 否则当 localStorage 游标丢失（归零）时，刷新页面会把历史气泡与声音全部再执行一遍。
+    const TRANSIENT_ACTIONS = { speak: true, bubble: true, motion: true }
     let lastCommandId = (() => {
       try {
         const v = JSON.parse(localStorage.getItem(CMD_ID_KEY) || '0')
@@ -356,6 +453,7 @@
       }
     })()
     let polling = false
+    let firstPoll = true
     async function pollCommands() {
       if (polling) return
       polling = true
@@ -363,16 +461,17 @@
         const r = await (await fetch(API + '/commands?since=' + lastCommandId)).json()
         const list = (r && r.commands) || []
         for (const cmd of list) {
-          if (cmd && cmd.id > lastCommandId) {
-            lastCommandId = cmd.id
-            try {
-              localStorage.setItem(CMD_ID_KEY, JSON.stringify(lastCommandId))
-            } catch (e) {}
-          }
+          if (!cmd || cmd.id <= lastCommandId) continue
+          lastCommandId = cmd.id
+          try {
+            localStorage.setItem(CMD_ID_KEY, JSON.stringify(lastCommandId))
+          } catch (e) {}
+          if (firstPoll && TRANSIENT_ACTIONS[cmd.action]) continue
           try {
             await execCommand(cmd)
           } catch (e) {}
         }
+        firstPoll = false
       } catch (e) {
       } finally {
         polling = false
@@ -411,51 +510,154 @@
     }
     setInterval(pushState, 5000)
 
-    /* ── 拖拽移动 ── */
+    /* ── 缩放（以指针/滚轮位置为锚点；修正原实现中 applyScale 先改 viewScale 导致锚点失效的问题） ── */
+    function zoomAt(cx, cy, factor) {
+      const r = root.getBoundingClientRect()
+      const oldScale = viewScale
+      const px = cx - r.left
+      const py = cy - r.top
+      const ns = Math.max(0.25, Math.min(3, oldScale * factor))
+      if (ns === oldScale) return
+      applyScale(ns)
+      applyPos(cx - px * (ns / oldScale), cy - py * (ns / oldScale))
+    }
+
+    /* ── 拖拽移动 / 双指缩放 / 长按菜单 ── */
+    const pointers = new Map() // pointerId -> { x, y, startX, startY }
     let dragging = false
+    let dragPointerId = null
     let dragDx = 0
     let dragDy = 0
-    root.addEventListener('pointerdown', (e) => {
-      if (e.target === menu || menu.contains(e.target)) return
-      if (e.button !== 0) return
-      dragging = true
-      root.setPointerCapture(e.pointerId)
-      const r = root.getBoundingClientRect()
-      dragDx = e.clientX - r.left
-      dragDy = e.clientY - r.top
-      e.preventDefault()
-    })
-    root.addEventListener('pointermove', (e) => {
-      if (!dragging) return
-      applyPos(e.clientX - dragDx, e.clientY - dragDy)
-    })
-    function endDrag() {
-      if (!dragging) return
-      dragging = false
+    let lastPinchDist = 0
+    let longPressTimer = null
+    let longPressPointerId = null
+    let longPressFired = false
+    let suppressClickUntil = 0
+    const LONG_PRESS_MS = 500
+    const MOVE_TOLERANCE = 6
+
+    function dist(a, b) {
+      return Math.hypot(a.x - b.x, a.y - b.y)
+    }
+    function midpoint(a, b) {
+      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+    }
+    function cancelLongPress() {
+      if (longPressTimer) {
+        clearTimeout(longPressTimer)
+        longPressTimer = null
+      }
+      longPressPointerId = null
+    }
+    function savePos() {
       const r = root.getBoundingClientRect()
       try {
         localStorage.setItem(POS_KEY, JSON.stringify({ x: r.left, y: r.top }))
       } catch (e) {}
     }
-    root.addEventListener('pointerup', endDrag)
-    root.addEventListener('pointercancel', endDrag)
+    function startLongPress(e) {
+      cancelLongPress()
+      const sx = e.clientX
+      const sy = e.clientY
+      longPressPointerId = e.pointerId
+      longPressFired = false
+      longPressTimer = setTimeout(() => {
+        longPressTimer = null
+        if (longPressFired) return
+        longPressFired = true
+        dragging = false
+        buildMenu(sx, sy)
+      }, LONG_PRESS_MS)
+    }
+
+    root.addEventListener('pointerdown', (e) => {
+      if (e.target === menu || menu.contains(e.target)) return
+      if (e.pointerType === 'mouse' && e.button !== 0) return
+      e.preventDefault()
+      try {
+        root.setPointerCapture(e.pointerId)
+      } catch (err) {}
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, startX: e.clientX, startY: e.clientY })
+
+      if (pointers.size === 1) {
+        dragPointerId = e.pointerId
+        const r = root.getBoundingClientRect()
+        dragDx = e.clientX - r.left
+        dragDy = e.clientY - r.top
+        dragging = true
+        longPressFired = false
+        if (e.pointerType === 'touch' || e.pointerType === 'pen') startLongPress(e)
+      } else if (pointers.size === 2) {
+        cancelLongPress()
+        dragging = false
+        const pts = [...pointers.values()]
+        lastPinchDist = dist(pts[0], pts[1])
+      } else {
+        cancelLongPress()
+        dragging = false
+      }
+    })
+
+    root.addEventListener('pointermove', (e) => {
+      const p = pointers.get(e.pointerId)
+      if (!p) return
+      p.x = e.clientX
+      p.y = e.clientY
+
+      if (pointers.size === 2) {
+        cancelLongPress()
+        dragging = false
+        const pts = [...pointers.values()]
+        const d = dist(pts[0], pts[1])
+        if (lastPinchDist > 0 && d > 0) {
+          const mid = midpoint(pts[0], pts[1])
+          zoomAt(mid.x, mid.y, d / lastPinchDist)
+        }
+        lastPinchDist = d
+        return
+      }
+
+      if (!dragging || e.pointerId !== dragPointerId || longPressFired) return
+      if (longPressTimer && Math.hypot(e.clientX - p.startX, e.clientY - p.startY) > MOVE_TOLERANCE) {
+        cancelLongPress()
+      }
+      applyPos(e.clientX - dragDx, e.clientY - dragDy)
+    })
+
+    function pointerEnd(e) {
+      const wasLongPress = longPressFired && e.pointerId === dragPointerId
+      pointers.delete(e.pointerId)
+      if (e.pointerId === longPressPointerId) cancelLongPress()
+      if (e.pointerId === dragPointerId) {
+        if (dragging && !longPressFired) savePos()
+        dragging = false
+        if (wasLongPress) suppressClickUntil = Date.now() + 150
+        longPressFired = false
+      }
+      if (pointers.size === 1) {
+        const first = pointers.entries().next().value
+        if (first) {
+          dragPointerId = first[0]
+          const r = root.getBoundingClientRect()
+          dragDx = first[1].x - r.left
+          dragDy = first[1].y - r.top
+          dragging = true
+        }
+      } else if (pointers.size === 0) {
+        dragging = false
+        lastPinchDist = 0
+      }
+    }
+    root.addEventListener('pointerup', pointerEnd)
+    root.addEventListener('pointercancel', pointerEnd)
 
     /* ── 滚轮缩放 ── */
     root.addEventListener(
       'wheel',
       (e) => {
+        if (e.target === menu || menu.contains(e.target)) return
         e.preventDefault()
-        const factor = e.deltaY < 0 ? 1.08 : 0.92
-        const r = root.getBoundingClientRect()
-        const cx = e.clientX - r.left
-        const cy = e.clientY - r.top
-        const newScale = viewScale * factor
-        applyScale(newScale)
-        // 以鼠标位置为锚点调整位置
-        const nx = e.clientX - cx * (newScale / viewScale)
-        const ny = e.clientY - cy * (newScale / viewScale)
-        applyPos(nx, ny)
-        applyScale(newScale)
+        zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.08 : 0.92)
       },
       { passive: false }
     )
@@ -465,7 +667,10 @@
       menu.innerHTML = ''
       const items = []
       items.push({ label: '默认表情', value: '' })
-      for (const exp of state.expressions) items.push({ label: exp, value: exp })
+      for (const exp of state.expressions) {
+        const on = stackActive.has(exp) && stackActive.get(exp).active
+        items.push({ label: (on ? '✓ ' : '') + exp, value: exp, stack: true })
+      }
       items.push({ type: 'sep' })
       for (const m of state.motions) items.push({ label: '动作 · ' + m, value: '__motion__' + m })
       items.push({ type: 'sep' })
@@ -488,14 +693,14 @@
           } else if (typeof it.value === 'string' && it.value.indexOf('__motion__') === 0) {
             playMotion(it.value.slice('__motion__'.length))
           } else {
-            setExpression(it.value)
+            setExpression(it.value, !!it.stack)
           }
         })
         menu.appendChild(b)
       }
       menu.classList.remove('mira-hide')
-      menu.style.left = Math.min(x, window.innerWidth - 200) + 'px'
-      menu.style.top = Math.min(y, window.innerHeight - menu.offsetHeight - 10) + 'px'
+      menu.style.left = Math.max(0, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + 'px'
+      menu.style.top = Math.max(0, Math.min(y, window.innerHeight - menu.offsetHeight - 10)) + 'px'
     }
     function hideMenu() {
       menu.classList.add('mira-hide')
@@ -505,10 +710,14 @@
       buildMenu(e.clientX, e.clientY)
     })
     document.addEventListener('click', (e) => {
+      if (Date.now() < suppressClickUntil) return
       if (menu.contains(e.target)) return
       hideMenu()
     })
-    document.addEventListener('scroll', hideMenu, true)
+    document.addEventListener('scroll', (e) => {
+      if (e.target === menu || menu.contains(e.target)) return
+      hideMenu()
+    }, true)
 
     /* ── 视线跟随 ── */
     document.addEventListener('pointermove', (e) => {

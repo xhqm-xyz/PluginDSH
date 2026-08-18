@@ -1,5 +1,5 @@
-/**
- * mira-live2d — DSH 主机端插件
+﻿/**
+ * mira_live2d — DSH 主机端插件
  * 职责：
  *   1. 注册模型可调用的 MCP 风格工具（ctx.tools）
  *   2. 通过 webServer 提供静态资源（widget 脚本、Live2D 运行库、模型文件）与指令/状态 API
@@ -15,7 +15,7 @@ import { readdir } from 'node:fs/promises'
 import { join, dirname, extname, resolve, sep, normalize, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const name = 'mira-live2d'
+export const name = 'mira_live2d'
 export const inject = ['webServer', 'tools']
 
 // 插件根目录（本文件位于 <root>/lib/index.js）
@@ -58,7 +58,9 @@ const TTS_PROVIDERS = {
 // 运行期状态（进程内）
 let cfg = structuredClone(DEFAULTS)
 let modelDir = DEFAULT_MODEL_DIR
-let nextCommandId = 1
+// 用时间戳作指令 ID 起点：服务器重启后指令 ID 仍保持递增，
+// 避免客户端持久化的游标（since）大于新指令 ID 而漏收指令。
+let nextCommandId = Date.now() * 1000
 const commandQueue = []
 const audioStore = new Map() // audioId -> { mime, base64 }
 let clientState = null
@@ -264,11 +266,15 @@ function registerTools(ctx) {
 
   defs.push(textTool(
     'mira_set_expression',
-    '切换看板娘表情；传空字符串恢复默认表情。',
-    obj({ expression: str('表情名（空串恢复默认）') }),
+    '切换看板娘表情；传空字符串恢复默认表情。stack=true 时作为叠加表情开关（可多个叠加并存），否则互斥替换。',
+    obj({
+      expression: str('表情名（空串恢复默认）'),
+      stack: bool('true=叠加开关（可多个并存）；false=互斥替换（默认）'),
+    }),
     async (args) => {
-      pushCommand('expression', args.expression ?? '')
-      return (args.expression ?? '') === '' ? '已恢复默认表情' : '已下发表情切换：' + args.expression
+      pushCommand('expression', { name: args.expression ?? '', stack: !!args.stack })
+      const nm = args.expression ?? ''
+      return nm === '' ? '已恢复默认表情' : '已下发表情' + (args.stack ? '叠加切换' : '切换') + '：' + nm
     },
   ))
 

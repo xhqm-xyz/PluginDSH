@@ -1,4 +1,4 @@
-# mira-live2d · DSH 看板娘插件
+# mira_live2d · DSH 看板娘插件
 
 把 xhqm-live2d（WordPress 插件）移植为 DSH 原生插件：看板娘作为对话界面浮层出现，模型可通过 MCP 工具说话、切表情、切模型、切动作，并随「思考 / 等待确认 / 空闲」自动切换表情。
 
@@ -7,8 +7,8 @@
 本插件以链接方式装入 `web` profile：
 
 - 源码目录：`DeepSeek\WorkSpace\dsh-live2d`
-- 链接：`C:\Users\xhqm\.dsh\profiles\node_modules\mira-live2d` → `DeepSeek\WorkSpace\dsh-live2d`（junction）
-- 行配置：`C:\Users\xhqm\.dsh\profiles\web\cordis.patch.yml` 中的 `mira-live2d` 行
+- 链接：`~\.dsh\profiles\node_modules\mira_live2d` → `DeepSeek\WorkSpace\dsh-live2d`（junction）
+- 行配置：`~\.dsh\profiles\web\cordis.patch.yml` 中的 `mira_live2d` 行
 
 改动源码后重启 `dsh web` 生效。
 
@@ -31,7 +31,7 @@
 | `mira_list_models` | 列出 model 文件夹所有模型 |
 | `mira_get_model_capabilities` | 解析 model3.json 返回表情/动作清单 |
 | `mira_switch_model` | 切换展出模型 |
-| `mira_set_expression` | 切换表情（空串恢复默认） |
+| `mira_set_expression` | 切换/叠加表情（空串恢复默认；`stack=true` 叠加并存） |
 | `mira_play_motion` | 播放动作组 |
 | `mira_speak` | TTS 合成语音 + 气泡（让模型说话） |
 | `mira_bubble` | 只显示气泡不朗读 |

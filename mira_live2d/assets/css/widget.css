@@ -1,4 +1,4 @@
-/* mira-live2d 看板娘浮层样式 */
+﻿/* mira_live2d 看板娘浮层样式 */
 #mira-l2d-root {
   position: fixed;
   z-index: 2147483000;
@@ -52,8 +52,14 @@
   position: fixed;
   z-index: 2147483001;
   min-width: 160px;
+  max-width: min(85vw, 360px);
   max-height: 60vh;
   overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
   background: rgba(28, 30, 38, 0.96);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 10px;

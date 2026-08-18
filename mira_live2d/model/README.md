@@ -1,4 +1,4 @@
-# 看板娘模型目录
+﻿# 看板娘模型目录
 
 把 Live2D 模型原样放到本目录，每个模型一个子目录，目录内必须包含一个 `*.model3.json`。
 
@@ -19,4 +19,4 @@ model/
 - 模型文件经 `/live2d/models/` 由主机端代理输出，不会暴露为独立静态目录。
 
 > 注：当前工作区未附带模型文件（原模型在 NAS `/volume1/web/live2d-models/` 上）。请把模型目录复制到这里后，在
-> `C:\Users\xhqm\.dsh\profiles\web\cordis.patch.yml` 的 `mira-live2d` 配置里把 `model` 改成目录名（例如 `StellaMira`）。
+> `C:\Users\xhqm\.dsh\profiles\web\cordis.patch.yml` 的 `mira_live2d` 配置里把 `model` 改成目录名（例如 `StellaMira`）。
