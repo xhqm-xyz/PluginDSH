@@ -104,20 +104,22 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-napcat.ps1 -Restart
 
 ### 第 2 步：获取源码并链接进 web profile
 
-先获取插件源码（本插件位于 PluginDSH 仓库的 `mira_qqbot/` 子目录）：
+本插件位于 PluginDSH 仓库的 `mira_qqbot/` 子目录。任选其一：
 
 ```bash
+# A. 克隆仓库后链接 / 拷贝到 profile 的 node_modules
 git clone https://github.com/xhqm-xyz/PluginDSH.git
+# Windows（junction）：
+#   mklink /J %USERPROFILE%\.dsh\profiles\node_modules\mira_qqbot <克隆路径>\mira_qqbot
+# Linux/macOS：
+#   ln -s <克隆路径>/mira_qqbot ~/.dsh/profiles/node_modules/mira_qqbot
+# 或直接把 mira_qqbot 目录拷贝到 ~/.dsh/profiles/node_modules/
+
+# B. 用 dsh 的插件命令安装
+dsh plugin --profile web add <mira_qqbot 目录路径>
 ```
 
-再把 `mira_qqbot/` 目录链接进 web profile：
-
-```bash
-cd ~/.dsh/profiles/web
-pnpm add mira_qqbot@link:<PluginDSH 目录下的 mira_qqbot 绝对路径>
-```
-
-> 提示：如果之前链接过，先 `pnpm remove mira_qqbot` 再重新 add。
+> 提示：如果之前链接过，先移除旧链接再重新链接。
 
 ### 第 3 步：在 patch 配置里启用插件
 
@@ -169,7 +171,7 @@ bash scripts/restart-dsh-web.sh
 | `callTimeoutMs` | `8000` | OneBot API 调用超时（毫秒） |
 | `bufferSize` | `500` | 收到的消息环形缓冲上限（条） |
 | `autoReply.enabled` | `false` | 自动应答模式总开关（见下节） |
-| `autoReply.personaPrompt` | `''`（内置蝶清梦人设） | 人设提示词，留空用预设自带人设 |
+| `autoReply.personaPrompt` | `''`（内置默认人设） | 人设提示词，留空用预设自带人设 |
 | `autoReply.rulesPrompt` | `[]`（内置聊天规则） | 聊天规则提示词（数组或字符串），留空用内置默认规则 |
 | `autoReply.securityPrompt` | `[]`（内置安全规则） | 安全规则提示词，留空用内置默认安全规则 |
 | `autoReply.systemPrompt` | `''`（已废弃，兼容） | 旧字段；若配置且未配 `personaPrompt`，则当作人设使用 |
@@ -192,7 +194,7 @@ bash scripts/restart-dsh-web.sh
 - **自动唤醒**：新消息到达即自动处理（唤醒 DSH agent → 回复），无需轮询；
 - **不回复自己**：自己账号发的消息不会被触发。
 
-**提示词**：每次回复的 system 消息由「聊天规则」+「人设」两块组成（`rulesPrompt` 与 `personaPrompt` 均留空时使用内置默认）。例如规则可写「你应当多次简短的回复而非一次复杂的回复」，人设留空即默认蝶清梦。
+**提示词**：每次回复的 system 消息由「聊天规则」+「人设」两块组成（`rulesPrompt` 与 `personaPrompt` 均留空时使用内置默认）。例如规则可写「你应当多次简短的回复而非一次复杂的回复」，人设留空即使用预设自带人设。
 
 **会话持久化**：agent 会话由 DSH 自身的 session 机制落盘，`agentCwd/data` 存放 chatId→sessionId 映射（`meta.json`）与下载的附件（`files/`）；即使 dsh web 重启，按映射自动恢复会话，效果与单独的一个 dsh 会话一致；`/new` 会释放该 agent 并删除映射。
 
@@ -204,7 +206,7 @@ bash scripts/restart-dsh-web.sh
 - 消息到达 → 插件通过 `ctx.agents` **创建（create）或恢复（resume）**该对象的 agent → `followup()` 注入消息并唤醒 → agent 推理产出回复 → 原路发回 QQ；
 - 新 agent 会**挂载到 `agentPreset` 指定的预设**（默认 `sylvia`）——没有预设的 agent 工具/提示词为空层且装配报错，这是必须配置的原因；会话标题自动设为「用户名(QQ号)」/「群名(群号)」，在 DSH 界面按预设正常分组显示；
 - 会话由 DSH 自身的 session 持久化机制落盘，**重启 dsh web 后按 `meta.json` 映射自动恢复**，和独立 dsh 会话效果一致；
-- `agentProvider` / `agentModel` 留空时使用宿主默认模型与预设（例如 sylvia 预设即蝶清梦人设）；`/new` 会释放该 agent 并删除映射，下次消息重建全新会话。
+- `agentProvider` / `agentModel` 留空时使用宿主默认模型与预设（默认 `sylvia` 预设自带人设）；`/new` 会释放该 agent 并删除映射，下次消息重建全新会话。
 
 > ⚠️ **安全提醒**：agent 模式下，QQ 上的聊天对象能触发完整 agent（含 bash 等工具）。请确认你的 QQ 好友/群可信，或配合宿主权限预设（preset）限制；不建议把此模式暴露给陌生人群聊。
 

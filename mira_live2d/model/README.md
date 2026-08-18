@@ -18,5 +18,5 @@ model/
 - 切换模型用 `mira_switch_model(model="目录名")`，或前端右键菜单（切表情/动作）。
 - 模型文件经 `/live2d/models/` 由主机端代理输出，不会暴露为独立静态目录。
 
-> 注：模型文件（`.moc3` / 贴图 / `.exp3.json` / `.motion3.json`）是私有资产，**不入 git 库**（`.gitignore` 已排除 `model/*`）。请自行获取模型后放入本目录，再在
+> 注：模型文件（`.moc3` / 贴图 / `.exp3.json` / `.motion3.json`）不入 git 库（`.gitignore` 已排除 `model/*`），请自行获取后放入本目录，再在
 > `~/.dsh/profiles/web/cordis.patch.yml` 的 `mira_live2d` 配置里把 `model` 改成目录名（例如 `StellaMira`）。

@@ -16,6 +16,6 @@ DSH（DeepSeek Harness）客户端插件集。每个插件都是零第三方运�
 
 ## 资产边界
 
-- `mira_live2d/model/`：Live2D 模型（`.moc3` / 贴图 / `.exp3.json` / `.motion3.json`）为私有资产，不入 git 库（`.gitignore` 排除），请自行获取放入对应目录。
-- `mira_tavern/scripts/`：剧本 `*.script.json` 随库分发（`_example` 为样例），私有剧本自行放置或忽略。
+- `mira_live2d/model/`：Live2D 模型（`.moc3` / 贴图 / `.exp3.json` / `.motion3.json`）不入 git 库（`.gitignore` 排除），请自行获取放入对应目录。
+- `mira_tavern/scripts/`：剧本 `*.script.json` 随库分发（`_example` 为样例），自用剧本自行放置或忽略。
 - `mira_qqbot`：连接凭据（`accessToken`）只写本机 `cordis.patch.yml`，切勿提交到仓库。

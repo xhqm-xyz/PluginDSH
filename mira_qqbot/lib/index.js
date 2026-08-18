@@ -38,7 +38,7 @@ const DEFAULTS = {
   // 收到 newCommand 消息即重置该对象的会话。enabled 为 false 时完全关闭。
   autoReply: {
     enabled: false,
-    // 人设提示词；留空使用预设自带人设（sylvia 预设即蝶清梦）
+    // 人设提示词；留空使用预设自带人设
     personaPrompt: '',
     // 行为规则提示词（数组，每条一条规则）；留空使用内置默认规则
     rulesPrompt: [],
