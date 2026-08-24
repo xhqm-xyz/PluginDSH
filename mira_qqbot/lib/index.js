@@ -541,12 +541,15 @@ async function ensureAgent(chatId, title) {
   let sessionId = ''
 
   // ── 恢复持久化会话（重启后从磁盘恢复） ──
-  // 只读 meta，不落盘；失败重试一次以容忍瞬时异常（如启动期服务尚未就绪），
-  // 两次都失败才降级为新建，避免“每次重启都换新会话”的绑定丢失。
+  // 「while it is live」表示该会话仍被占用（半开 turn 残留 / 并发碰撞），
+  // 等它退休后再 resume 即可，按 0/500/1000/2000ms 退避重试，耗尽才降级新建。
+  // 其他错误（会话损坏/不存在）等待无益，一次失败即降级。
   const snapshot = loadAgentMeta()
   const persistedId = snapshot[chatId]
   if (persistedId) {
-    for (let attempt = 0; attempt < 2 && !agent; attempt++) {
+    const resumeDelays = [0, 500, 1000, 2000]
+    for (let attempt = 0; attempt < resumeDelays.length && !agent; attempt++) {
+      if (attempt > 0) await sleep(resumeDelays[attempt])
       try {
         const h = await svc.resume({
           resumeSessionId: persistedId,
@@ -561,12 +564,15 @@ async function ensureAgent(chatId, title) {
         await attachToWorkspace(sessionId, ar.agentCwd)
         loggerRef?.info?.('[mira_qqbot] 已恢复 agent 会话 ' + sessionId + '（' + chatId + '）')
       } catch (e) {
+        const msg = e && e.message ? e.message : String(e)
+        const live = /while it is live/i.test(msg)
         const detail = e && e.stack ? e.stack : String(e)
-        if (attempt === 0) {
-          loggerRef?.warn?.('[mira_qqbot] 恢复会话失败，重试一次 ' + persistedId + '（' + chatId + '）：' + detail)
-        } else {
-          loggerRef?.warn?.('[mira_qqbot] 恢复会话失败 ' + persistedId + '（' + chatId + '），将新建会话：' + detail)
+        const isLast = attempt === resumeDelays.length - 1
+        if (isLast || !live) {
+          loggerRef?.warn?.('[mira_qqbot] 恢复会话失败 ' + persistedId + '（' + chatId + '）' + (live ? '，live 重试耗尽' : '') + '，将新建会话：' + detail)
+          break
         }
+        loggerRef?.warn?.('[mira_qqbot] 恢复会话失败（live，等待退休后重试）' + persistedId + '（' + chatId + '）：' + msg)
       }
     }
   }

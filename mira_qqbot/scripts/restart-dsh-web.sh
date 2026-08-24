@@ -24,15 +24,30 @@ if [ -n "${TRUSTED_HOSTS:-}" ]; then
   done
 fi
 
-echo "==> 停止当前 dsh web"
+echo "==> 停止当前 dsh web（优雅停机，等待会话 flush）"
 # 用端口定位 PID 更可靠（macOS 的 pkill -f 可能匹配不到带参数的 node 进程）
 OLDPID=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1)
 if [ -n "$OLDPID" ]; then
-  kill "$OLDPID" 2>/dev/null && echo "    已停止 PID $OLDPID" || echo "    停止失败（PID $OLDPID）"
+  kill "$OLDPID" 2>/dev/null && echo "    已发送 SIGTERM 到 PID $OLDPID" || echo "    发送 SIGTERM 失败（PID $OLDPID）"
+  # 最多等 20s 让进程优雅退出：正在进行的 turn 需要时间落盘，
+  # 过早强制结束会把会话留成 live/半开（重启后 resume 报 while it is live 的主因）。
+  for _ in $(seq 1 20); do
+    if ! kill -0 "$OLDPID" 2>/dev/null; then
+      echo "    已优雅退出 PID $OLDPID"
+      break
+    fi
+    sleep 1
+  done
+  # 超时仍未退出才强制结束；残留 live 会话风险由插件 resume 退避重试兜底
+  if kill -0 "$OLDPID" 2>/dev/null; then
+    echo "    超时未退出，强制结束 PID $OLDPID"
+    kill -9 "$OLDPID" 2>/dev/null || true
+    sleep 1
+  fi
 else
   echo "    没有运行中的 dsh web"
 fi
-sleep 3
+sleep 1
 
 echo "==> 启动 dsh web（后台，日志 /tmp/dsh-web.log）"
 nohup "$DSH_BIN" "${ARGS[@]}" > /tmp/dsh-web.log 2>&1 &
