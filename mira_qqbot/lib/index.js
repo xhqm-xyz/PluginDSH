@@ -15,7 +15,8 @@
 
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { mkdirSync, readFileSync, writeFileSync, copyFileSync, renameSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { mkdirSync, readFileSync, writeFileSync, copyFileSync, renameSync, existsSync } from 'node:fs'
 
 export const name = 'mira_qqbot'
 export const inject = ['tools', 'agents', 'workspaceRegistry']
@@ -99,13 +100,18 @@ let connected = false
 let selfId = null
 let selfNickname = null
 let nextSeq = 0
-let messageSeq = 0
+// 以时间戳为 seq 起点：进程重启后 seq 仍保持递增，
+// 避免持久化 agent 会话里记录的旧 since 大于新 seq 而漏收消息
+let messageSeq = Date.now() * 1000
 const messageBuffer = [] // { seq, ts, ...event }
 let reconnectAttempts = 0
 let reconnectTimer = null
 let heartbeatTimer = null
 let lastAliveAt = 0
 let lastError = null
+// 去重状态：同 message_id 短窗口内的重复事件（双连接/重推）只保留第一条
+let lastDedupKey = ''
+let lastDedupAt = 0
 // 供自动应答打日志用（apply 时赋值）
 let loggerRef = null
 // DSH agents 服务（ctx.agents，apply 时赋值；agent 模式需要）
@@ -125,15 +131,16 @@ function deepMerge(base, patch) {
 }
 
 function extractText(event) {
-  if (typeof event.raw_message === 'string' && event.raw_message.length) return event.raw_message
-  if (typeof event.message === 'string') return event.message
+  // 优先解析 message 数组（图片/表情/语音等转成 [图片]/[表情] 标记）；
+  // raw_message 对非文本段是完整 CQ 码原串（含超长 url），只作兜底，
+  // 否则会把 CQ 码噪音灌给 agent
   if (Array.isArray(event.message)) {
     let out = ''
     for (const seg of event.message) {
       if (seg && seg.type === 'text') out += (seg.data && seg.data.text) || ''
       else if (seg && seg.type === 'at') out += seg.data && seg.data.qq === 'all' ? '@全体成员 ' : '@' + ((seg.data && seg.data.qq) || '') + ' '
       else if (seg && seg.type === 'image') out += '[图片]'
-      else if (seg && seg.type === 'face') out += '[表情]'
+      else if (seg && seg.type === 'face') out += '[表情' + (seg.data && seg.data.id ? ':id=' + seg.data.id : '') + ']'
       else if (seg && seg.type === 'record') out += '[语音]'
       else if (seg && seg.type === 'video') out += '[视频]'
       else if (seg && seg.type === 'file') out += '[文件]'
@@ -141,6 +148,8 @@ function extractText(event) {
     }
     return out.trim()
   }
+  if (typeof event.message === 'string' && event.message.length) return event.message
+  if (typeof event.raw_message === 'string' && event.raw_message.length) return event.raw_message
   return ''
 }
 
@@ -167,7 +176,7 @@ async function extractMessageTextRecursive(m, depth) {
     if (seg.type === 'text') out += (seg.data && seg.data.text) || ''
     else if (seg.type === 'at') out += seg.data && seg.data.qq === 'all' ? '@全体成员 ' : '@' + ((seg.data && seg.data.qq) || '') + ' '
     else if (seg.type === 'image') out += '[图片]'
-    else if (seg.type === 'face') out += '[表情]'
+    else if (seg.type === 'face') out += '[表情' + (seg.data && seg.data.id ? ':id=' + seg.data.id : '') + ']'
     else if (seg.type === 'record') out += '[语音]'
     else if (seg.type === 'video') out += '[视频]'
     else if (seg.type === 'file') out += '[文件' + ((seg.data && seg.data.file) ? '：' + seg.data.file : '') + ']'
@@ -305,6 +314,15 @@ function connect() {
       return
     }
     if (pt === 'message') {
+      // 去重：双连接/重推会把同一事件推送两次，按 message_id 短窗口去重，
+      // 避免缓冲重复、自动应答重复处理
+      const dedupKey = [data.message_type, data.message_id, data.user_id, data.group_id].join('|')
+      if (dedupKey === lastDedupKey && Date.now() - lastDedupAt < 8000) {
+        lastDedupAt = Date.now()
+        return
+      }
+      lastDedupKey = dedupKey
+      lastDedupAt = Date.now()
       messageSeq++
       messageBuffer.push({
         seq: messageSeq,
@@ -331,10 +349,38 @@ function connect() {
           lastError = '自动回复异常：' + (e && e.message ? e.message : String(e))
         })
       }
+    } else if (pt === 'request') {
+      // 好友申请 / 加群请求：缓冲供模型拉取，flag 用于 qq_handle_friend_request / qq_handle_group_request
+      const reqKey = 'req|' + data.request_type + '|' + data.flag
+      if (reqKey === lastDedupKey && Date.now() - lastDedupAt < 8000) {
+        lastDedupAt = Date.now()
+        return
+      }
+      lastDedupKey = reqKey
+      lastDedupAt = Date.now()
+      messageSeq++
+      messageBuffer.push({
+        seq: messageSeq,
+        ts: Date.now(),
+        post_type: 'request',
+        request_type: data.request_type,
+        sub_type: data.sub_type,
+        user_id: data.user_id,
+        group_id: data.group_id,
+        comment: data.comment,
+        flag: data.flag,
+      })
+      if (messageBuffer.length > cfg.bufferSize) {
+        messageBuffer.splice(0, messageBuffer.length - cfg.bufferSize)
+      }
     }
   })
 
   sock.addEventListener('close', () => {
+    // 只处理「当前」socket 的关闭：connect() 主动关闭旧连接重连时，
+    // 旧 socket 的 close 事件会在新连接建立后才到达，若不加判断会把
+    // 新连接的 ws 引用清空（幽灵连接：connected=true 但无法发送），并排多余重连
+    if (ws !== sock) return
     connected = false
     ws = null
     scheduleReconnect()
@@ -472,11 +518,15 @@ function presetSetup(agentCtx) {
   })
 }
 
-// 会话标题（界面显示用）：用户名+QQ号 / 群名+群号
-function sessionTitleFor(data) {
+// 会话标题（界面显示用）：群名+群号 / 用户名+QQ号
+async function sessionTitleFor(data) {
   const isGroup = data.message_type === 'group'
   if (isGroup) {
-    const name = (data.sender && (data.sender.card || data.sender.nickname)) || '群聊'
+    let name = '群聊'
+    try {
+      const info = await call('get_group_info', { group_id: data.group_id })
+      if (info && info.group_name) name = info.group_name
+    } catch { /* 拿不到群名时降级 */ }
     return name + '(' + data.group_id + ')'
   }
   const name = (data.sender && (data.sender.nickname || data.sender.card)) || String(data.user_id)
@@ -646,12 +696,16 @@ async function agentReply(agent, text) {
   const session = agent.session
   const before = session.deriveMessages().length
   // 注入完整用户消息：必须带 source（否则宿主 RuntimeContextProjection 读 source.kind 崩溃）
-  agent.followup({
-    id: 'qqmsg-' + crypto.randomUUID(),
-    role: 'user',
-    content: [{ type: 'text', text }],
-    source: { kind: 'user' },
-  })
+  try {
+    await agent.followup({
+      id: 'qqmsg-' + crypto.randomUUID(),
+      role: 'user',
+      content: [{ type: 'text', text }],
+      source: { kind: 'user' },
+    })
+  } catch (e) {
+    throw new Error('followup 注入失败：' + (e && e.message ? e.message : String(e)))
+  }
   const deadline = Date.now() + (cfg.autoReply.agentTimeoutMs || 180000)
   while (agent.status === 'running' && Date.now() < deadline) {
     await sleep(250)
@@ -668,15 +722,21 @@ async function agentReply(agent, text) {
       return messageText(m).trim()
     }
   }
-  // 可能 followup 后 agent 没有产出（例如用户消息后直接完成）
+  // 可能 followup 后 agent 没有产出（例如用户消息后直接完成）；
+  // 只接受 assistant 消息，避免把用户消息本身误当回复返回
   const last = msgs[msgs.length - 1]
-  const lastText = messageText(last)
-  if (lastText) return lastText.trim()
+  if (last && last.role === 'assistant') {
+    const lastText = messageText(last)
+    if (lastText) return lastText.trim()
+  }
   throw new Error('agent 未产出回复')
 }
 
 async function handleAgentReply(chatId, data, text) {
-  const agent = await ensureAgent(chatId, sessionTitleFor(data))
+  // 仅在需要新建/恢复会话时才查群名（get_group_info 一次调用），已有会话直接复用
+  const existing = agentSessions.get(chatId)
+  const title = existing ? null : await sessionTitleFor(data)
+  const agent = await ensureAgent(chatId, title)
   // 不再自动转发：agent 会按提示词调用 qq_send_private_msg / qq_send_group_msg 自己回复
   const reply = await agentReply(agent, text)
   loggerRef?.info?.('[mira_qqbot] agent 已处理 ' + chatId + (reply ? '：' + reply.slice(0, 40) : ''))
@@ -692,8 +752,9 @@ async function sendReply(data, text) {
 
 // ── 附件（图片/文件/语音/视频）下载保存 ─────────────────────────
 // 保存目录：agentCwd/data 下的 files/；没有 agentCwd 则 /tmp/mira_qqbot_files
+// 保存目录：agentCwd/data 下的 files/；没有 agentCwd 则系统临时目录
 function mediaDir() {
-  return resolve(dataDir() || '/tmp', 'files')
+  return resolve(dataDir() || tmpdir(), 'files')
 }
 
 async function downloadTo(url, destPath) {
@@ -703,6 +764,8 @@ async function downloadTo(url, destPath) {
       'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
       Referer: 'https://www.qq.com/',
     },
+    // 防止卡死的下载挂起整条消息处理
+    signal: AbortSignal.timeout(15000),
   })
   if (!resp.ok) throw new Error('HTTP ' + resp.status)
   const buf = Buffer.from(await resp.arrayBuffer())
@@ -710,36 +773,33 @@ async function downloadTo(url, destPath) {
   writeFileSync(destPath, buf)
 }
 
-// 私聊文件 / 图片本地缓存可能缺失：统一走 OneBot 接口拉取（更长超时）
-async function saveViaOneBotApi(action, params, name, dir, errMsg) {
-  const r = await call(action, params, 15000)
-  mkdirSync(dir, { recursive: true })
-  const dest = resolve(dir, name)
-  if (r && typeof r.file === 'string') {
-    copyFileSync(r.file, dest) // NapCat 返回本地路径：复制到保存目录
-    return dest
-  }
-  if (r && typeof r.base64 === 'string') {
-    writeFileSync(dest, Buffer.from(r.base64, 'base64'))
-    return dest
-  }
-  if (r && typeof r.url === 'string') {
-    await downloadTo(r.url, dest)
-    return dest
-  }
-  throw new Error(errMsg)
+// 文件名清洗：消息里的文件名不可信（可含 ../ 或绝对路径），
+// 直接 resolve 会逃逸保存目录；统一替换分隔符与连续点
+function safeName(name, fallback) {
+  const s = String(name || fallback || 'file')
+    .replace(/[\\/]+/g, '_')
+    .replace(/\.{2,}/g, '_')
+    .replace(/[\x00-\x1f]/g, '_')
+    .slice(0, 120)
+  return s || String(fallback || 'file')
 }
 
-// 私聊文件（CQ:file 只有 file_id 没有 url）：走 OneBot get_file 接口
-function saveViaGetFile(seg, dir) {
-  const name = seg.data.file || ('file_' + Date.now().toString(36) + '.bin')
-  return saveViaOneBotApi('get_file', { file_id: seg.data.file_id }, name, dir, 'get_file 无可用结果')
+// 媒体语义分类：按段类型 + 文件扩展名细分，告知 agent 时更准确
+function kindFor(seg) {
+  const type = seg.type
+  if (type === 'record') return '语音'
+  if (type === 'image') return '图片'
+  if (type === 'video') return '视频'
+  const name = String((seg.data && (seg.data.file || seg.data.file_name || seg.data.path)) || '').toLowerCase()
+  if (/\.(mp3|wav|flac|m4a|aac|ogg|opus|amr|silk)$/.test(name)) return '音频文件'
+  if (/\.(mp4|mov|mkv|avi|webm|flv|wmv)$/.test(name)) return '视频文件'
+  return '其他文件'
 }
 
-// 图片（QQ 直链对外部进程常过期/拒绝）：走 OneBot get_image 接口
-function saveViaGetImage(seg, dir) {
-  const name = seg.data.file || ('img_' + Date.now().toString(36) + '.jpg')
-  return saveViaOneBotApi('get_image', { file: seg.data.file }, name, dir, 'get_image 无可用结果')
+// 语音统一存为 wav：QQ 语音实为 SILK 编码，由 NapCat get_record 转码后落盘
+function voiceName(file) {
+  const base = String(file || '').replace(/\.(amr|silk|wav|mp3)$/i, '') || 'voice'
+  return safeName(base + '.wav', 'record_' + Date.now().toString(36) + '.wav')
 }
 
 // 递归收集消息里所有媒体段（含嵌套转发内嵌的），返回扁平 segments 数组
@@ -770,46 +830,95 @@ async function collectMediaSegments(data) {
 }
 
 // 下载保存一组媒体段，返回 { saved: [{kind, path}], failed: [描述] }
+// 统一策略（按优先级）：本地缓存路径复制 > NapCat 接口拉取（语音统一转 wav）> http 链接下载
 async function saveMediaSegments(segs) {
   const saved = []
   const failed = []
   const dir = mediaDir()
-  const kindMap = { image: '图片', file: '文件', record: '语音', video: '视频' }
+  const stamp = () => Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6)
+
+  // NapCat 接口拉取：优先返回的本地 file 路径，其次 base64，最后 http url
+  async function apiSave(action, params, destName) {
+    const r = await call(action, params, 20000)
+    const dest = resolve(dir, destName)
+    if (r && typeof r.file === 'string') {
+      mkdirSync(dir, { recursive: true })
+      copyFileSync(r.file, dest)
+      return dest
+    }
+    if (r && typeof r.base64 === 'string') {
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(dest, Buffer.from(r.base64, 'base64'))
+      return dest
+    }
+    if (r && typeof r.url === 'string' && /^https?:\/\//i.test(r.url)) {
+      await downloadTo(r.url, dest)
+      return dest
+    }
+    return null
+  }
 
   async function saveOne(seg) {
     const type = seg.type
-    const kind = kindMap[type]
-    const url = seg.data && seg.data.url
-    const file = seg.data && seg.data.file
-    const fileId = seg.data && seg.data.file_id
-    let dest = null
+    const kind = kindFor(seg)
+    const data = seg.data || {}
+    const file = data.file
+    const fileId = data.file_id
+    const url = data.url
+    const path = data.path
     try {
-      if (type === 'image' && file) {
-        // 图片优先走 OneBot get_image（QQ 直链对外部进程常过期）
+      // 1) 本地缓存路径（NapCat 通常已把媒体缓存到本地，最可靠）
+      if (typeof path === 'string' && path) {
         try {
-          dest = await saveViaGetImage(seg, dir)
-        } catch {
-          if (url) {
-            const name = type + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6) + '.jpg'
-            dest = resolve(dir, name)
-            await downloadTo(url, dest)
-          } else {
-            throw new Error('get_image 失败且无 url')
+          if (existsSync(path)) {
+            const name = type === 'record'
+              ? voiceName(file)
+              : safeName(file || (type + '_' + stamp() + (type === 'image' ? '.jpg' : '.bin')), type + '_' + stamp())
+            const dest = resolve(dir, name)
+            mkdirSync(dir, { recursive: true })
+            copyFileSync(path, dest)
+            loggerRef?.info?.('[mira_qqbot] 已保存' + kind + '：' + dest)
+            return { ok: { kind, path: dest } }
           }
+        } catch { /* 缓存不可用，继续走接口 */ }
+      }
+      // 2) 语音：NapCat get_record 统一转 wav（QQ 语音实为 SILK 编码）
+      if (type === 'record' && file) {
+        const dest = await apiSave('get_record', { file: String(file), out_format: 'wav' }, voiceName(file))
+        if (dest) {
+          loggerRef?.info?.('[mira_qqbot] 已保存' + kind + '：' + dest)
+          return { ok: { kind, path: dest } }
         }
-      } else if (type === 'file' && fileId) {
-        dest = await saveViaGetFile(seg, dir)
-      } else if (url) {
+      }
+      // 3) 图片：get_image
+      if (type === 'image' && file) {
+        const dest = await apiSave('get_image', { file: String(file) }, safeName(file, 'image_' + stamp() + '.jpg'))
+        if (dest) {
+          loggerRef?.info?.('[mira_qqbot] 已保存' + kind + '：' + dest)
+          return { ok: { kind, path: dest } }
+        }
+      }
+      // 4) 文件：get_file（file_id）
+      if (type === 'file' && fileId) {
+        const dest = await apiSave('get_file', { file_id: String(fileId) }, safeName(file, 'file_' + stamp() + '.bin'))
+        if (dest) {
+          loggerRef?.info?.('[mira_qqbot] 已保存' + kind + '：' + dest)
+          return { ok: { kind, path: dest } }
+        }
+      }
+      // 5) http 链接兜底（本地路径不是 http，跳过）
+      if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
         const extMatch = String(url).match(/\.([A-Za-z0-9]{1,6})(?:\?|$)/)
         const ext = (extMatch && extMatch[1]) || (type === 'image' ? 'jpg' : 'bin')
-        const name = type + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6) + '.' + ext
-        dest = resolve(dir, name)
+        const name = type === 'record'
+          ? voiceName(file)
+          : safeName(file || (type + '_' + stamp() + '.' + ext), type + '_' + stamp())
+        const dest = resolve(dir, name)
         await downloadTo(url, dest)
-      } else {
-        return { fail: kind + (file ? '「' + file + '」' : '') + '（无下载链接）' }
+        loggerRef?.info?.('[mira_qqbot] 已保存' + kind + '：' + dest)
+        return { ok: { kind, path: dest } }
       }
-      loggerRef?.info?.('[mira_qqbot] 已保存' + kind + '：' + dest)
-      return { ok: { kind, path: dest } }
+      return { fail: kind + (file ? '「' + file + '」' : '') + '（无可用来源：无本地缓存/接口/链接）' }
     } catch (e) {
       return { fail: kind + (file ? '「' + file + '」' : '') + '（已失效或下载失败）' }
     }
@@ -920,21 +1029,17 @@ async function handleAutoReply(data) {
 
   const chatId = isGroup ? 'group:' + data.group_id : 'user:' + data.user_id
   let text = extractText(data)
-  // 转发消息：把 [CQ:forward,id=...] 替换为实际内容
-  const fwd = await extractForwardContent(data)
-  if (fwd) {
-    text = text.replace(/\[CQ:forward,[^\]]*\]/g, '[转发消息]\n' + fwd)
-  }
-  if (!text) return
-  // 群聊：消息前标注发送者，合并多条时能区分是谁说的
-  if (isGroup) {
-    const sn = (data.sender && (data.sender.card || data.sender.nickname)) || String(data.user_id)
-    text = '群内昵称（' + sn + '｜' + data.user_id + '）：' + text
-  }
   loggerRef?.info?.('[mira_qqbot] 自动应答收到 ' + (isGroup ? '群聊' : '私聊') + '消息 ' + chatId + '：' + text.slice(0, 40))
 
-  // /new 重置会话
+  // /new 重置会话：必须对原始文本判断（在加群前缀/附件/合并之前），
+  // 否则群聊消息被「群内昵称」前缀污染后永远匹配不上
   if (ar.newCommand && text.trim() === ar.newCommand) {
+    // 作废合并窗口里积压的旧消息
+    const pm = pendingMerge.get(chatId)
+    if (pm) {
+      if (pm.timer) clearTimeout(pm.timer)
+      pendingMerge.delete(chatId)
+    }
     // 释放当前 agent 并删除会话映射，下次消息重建新会话
     const entry = agentSessions.get(chatId)
     if (entry && entry.agent) {
@@ -953,6 +1058,20 @@ async function handleAutoReply(data) {
       lastError = '自动回复发送失败：' + (e && e.message ? e.message : String(e))
     }
     return
+  }
+
+  // 转发消息：把 [CQ:forward,id=...] 替换为实际内容；
+  // 多个转发段时完整内容只插入一次（原实现对每个段都插一遍全量，内容重复 N 次）
+  const fwd = await extractForwardContent(data)
+  if (fwd) {
+    text = text.replace(/\[CQ:forward,[^\]]*\]/g, '')
+    text = (text.trim() ? text.trim() + '\n' : '') + '[转发消息]\n' + fwd
+  }
+  if (!text) return
+  // 群聊：消息前标注发送者，合并多条时能区分是谁说的
+  if (isGroup) {
+    const sn = (data.sender && (data.sender.card || data.sender.nickname)) || String(data.user_id)
+    text = '群内昵称（' + sn + '｜' + data.user_id + '）：' + text
   }
 
   // 附件保存：把本地路径拼进文本（含嵌套转发里的媒体）
@@ -1113,11 +1232,11 @@ function registerTools(ctx) {
 
   defs.push(textTool(
     'qq_recv_messages',
-    '增量拉取自上次以来收到的 QQ 消息（私聊/群聊/频道）。传 since 为上次返回的最大 seq，首次传 0；返回每条消息的 seq、来源（私聊/群）、发送者、文本内容、message_id 等。可据此应答：私聊用 qq_send_private_msg，群聊用 qq_send_group_msg。',
-    obj({ since: int('上次返回的最大 seq，首次 0'), limit: int('最多返回条数，默认 50') }),
+    '增量拉取自上次以来收到的 QQ 消息与请求（私聊/群聊/频道消息，以及好友申请/加群请求）。传 since 为上次返回的最大 seq，首次传 0；返回每条记录的 seq、post_type（message=聊天消息，request=好友/加群申请）、来源、发送者、文本内容、message_id 等。可据此应答：私聊用 qq_send_private_msg，群聊用 qq_send_group_msg；request 记录里的 flag 可传给 qq_handle_friend_request / qq_handle_group_request 处理申请。',
+    obj({ since: int('上次返回的最大 seq，首次 0'), limit: int('最多返回条数，默认 50，上限 500') }),
     async (args) => {
       const since = Number(args.since || 0)
-      const limit = Number(args.limit || 50)
+      const limit = Math.min(Math.max(1, Number(args.limit || 50)), 500)
       const list = messageBuffer.filter((m) => m.seq > since).slice(-limit)
       const maxSeq = list.length ? list[list.length - 1].seq : since
       return j({
@@ -1194,7 +1313,7 @@ function registerTools(ctx) {
 
   defs.push(textTool(
     'qq_handle_friend_request',
-    '处理好友申请：同意或拒绝。flag 来自收到的好友请求事件。',
+    '处理好友申请：同意或拒绝。flag 来自 qq_recv_messages 里 post_type=request 的记录（request_type=friend）。',
     obj({ flag: str('申请标识 flag'), approve: bool('true 同意 / false 拒绝'), remark: str('同意后设置的备注（可选）') }, ['flag', 'approve']),
     async (args) => {
       await call('set_friend_add_request', {
@@ -1208,7 +1327,7 @@ function registerTools(ctx) {
 
   defs.push(textTool(
     'qq_handle_group_request',
-    '处理加群申请：同意或拒绝。flag 与 sub_type 来自收到的加群请求事件。',
+    '处理加群申请：同意或拒绝。flag 与 sub_type 来自 qq_recv_messages 里 post_type=request 的记录（request_type=group）。',
     obj({ flag: str('申请标识 flag'), sub_type: str('add / invite'), approve: bool('true 同意 / false 拒绝'), reason: str('拒绝原因（可选）') }, ['flag', 'sub_type', 'approve']),
     async (args) => {
       await call('set_group_add_request', {
