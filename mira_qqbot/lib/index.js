@@ -541,9 +541,9 @@ async function ensureAgent(chatId, title) {
   let sessionId = ''
 
   // ── 恢复持久化会话（重启后从磁盘恢复） ──
-  // 「while it is live」表示该会话仍被占用（半开 turn 残留 / 并发碰撞），
-  // 等它退休后再 resume 即可，按 0/500/1000/2000ms 退避重试，耗尽才降级新建。
-  // 其他错误（会话损坏/不存在）等待无益，一次失败即降级。
+  // 「while it is live」= 会话已被某个 live agent 占用（旧实例残留 / 并发 / 框架自动恢复）。
+  // 此时优先复用该 live agent（svc.get 直接取现成的），而不是新建——这是根治，等待只是兜底。
+  // get 不到（说明正在退休的短暂窗口）才退避重试；其他错误（损坏/不存在）一次失败即降级。
   const snapshot = loadAgentMeta()
   const persistedId = snapshot[chatId]
   if (persistedId) {
@@ -563,13 +563,27 @@ async function ensureAgent(chatId, title) {
         ensureAgentPresetRecord(agent)
         await attachToWorkspace(sessionId, ar.agentCwd)
         loggerRef?.info?.('[mira_qqbot] 已恢复 agent 会话 ' + sessionId + '（' + chatId + '）')
+        break
       } catch (e) {
         const msg = e && e.message ? e.message : String(e)
         const live = /while it is live/i.test(msg)
+        if (live) {
+          // 会话已 live：直接复用现有 agent，不新建、不丢绑定
+          const liveAgent = typeof svc.get === 'function' ? svc.get(persistedId) : undefined
+          if (liveAgent) {
+            agent = liveAgent
+            sessionId = persistedId
+            ensureSessionTitle(agent, title)
+            ensureAgentPresetRecord(agent)
+            await attachToWorkspace(sessionId, ar.agentCwd)
+            loggerRef?.info?.('[mira_qqbot] 复用 live 会话 ' + sessionId + '（' + chatId + '）')
+            break
+          }
+        }
         const detail = e && e.stack ? e.stack : String(e)
         const isLast = attempt === resumeDelays.length - 1
         if (isLast || !live) {
-          loggerRef?.warn?.('[mira_qqbot] 恢复会话失败 ' + persistedId + '（' + chatId + '）' + (live ? '，live 重试耗尽' : '') + '，将新建会话：' + detail)
+          loggerRef?.warn?.('[mira_qqbot] 恢复会话失败 ' + persistedId + '（' + chatId + '）' + (live ? '，live 且取不到实例，重试耗尽' : '') + '，将新建会话：' + detail)
           break
         }
         loggerRef?.warn?.('[mira_qqbot] 恢复会话失败（live，等待退休后重试）' + persistedId + '（' + chatId + '）：' + msg)
