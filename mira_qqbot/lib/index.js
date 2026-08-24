@@ -15,7 +15,7 @@
 
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { mkdirSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, copyFileSync, renameSync } from 'node:fs'
 
 export const name = 'mira_qqbot'
 export const inject = ['tools', 'agents', 'workspaceRegistry']
@@ -419,6 +419,14 @@ function metaFile() {
   const d = dataDir()
   return d ? resolve(d, 'meta.json') : null
 }
+// meta.json 读写锁：不同聊天对象并发新建会话时，串行化 read-modify-write，
+// 避免“后写覆盖先写”把刚建立的绑定又冲掉（重启后绑定丢失的根因之一）。
+let metaLock = Promise.resolve()
+function withMetaLock(fn) {
+  const run = metaLock.then(fn, fn)
+  metaLock = run.catch(() => {})
+  return run
+}
 function loadAgentMeta() {
   const f = metaFile()
   if (!f) return {}
@@ -429,7 +437,10 @@ function saveAgentMeta(meta) {
   if (!f) return
   try {
     mkdirSync(resolve(f, '..'), { recursive: true })
-    writeFileSync(f, JSON.stringify(meta, null, 2), 'utf8')
+    // 原子写：先写临时文件再 rename，避免进程中途退出留下半截 meta.json
+    const tmp = f + '.tmp'
+    writeFileSync(tmp, JSON.stringify(meta, null, 2), 'utf8')
+    renameSync(tmp, f)
   } catch (e) {
     loggerRef?.warn?.('[mira_qqbot] 保存 agent 会话映射失败：' + (e && e.message ? e.message : String(e)))
   }
@@ -517,8 +528,6 @@ async function ensureAgent(chatId, title) {
   if (!svc) throw new Error('DSH agents 服务不可用，无法使用 agent 模式')
   const existing = agentSessions.get(chatId)
   if (existing && existing.agent) return existing.agent
-  const meta = loadAgentMeta()
-  const sessionId = meta[chatId]
   const presetId = ar.agentPreset || 'sylvia'
   // provider/model 选项（create 与 resume 都需要，否则 agent 无模型可用）
   const agentOptions = {}
@@ -527,46 +536,76 @@ async function ensureAgent(chatId, title) {
   if (!ar.agentProvider && !ar.agentModel) {
     loggerRef?.warn?.('[mira_qqbot] agent 模式未配置 agentProvider/agentModel，会报 "has no provider/model"，请参考宿主默认模型配置')
   }
+
   let agent = null
-  if (sessionId) {
-    // 已有映射：优先恢复持久化会话（重启后从磁盘恢复）
-    try {
-      const h = await svc.resume({
-        resumeSessionId: sessionId,
+  let sessionId = ''
+
+  // ── 恢复持久化会话（重启后从磁盘恢复） ──
+  // 只读 meta，不落盘；失败重试一次以容忍瞬时异常（如启动期服务尚未就绪），
+  // 两次都失败才降级为新建，避免“每次重启都换新会话”的绑定丢失。
+  const snapshot = loadAgentMeta()
+  const persistedId = snapshot[chatId]
+  if (persistedId) {
+    for (let attempt = 0; attempt < 2 && !agent; attempt++) {
+      try {
+        const h = await svc.resume({
+          resumeSessionId: persistedId,
+          ...(Object.keys(agentOptions).length ? { agentOptions } : {}),
+          setup: presetSetup,
+        })
+        agent = h && h.agent
+        if (!agent) throw new Error('resume 未返回 agent')
+        sessionId = persistedId
+        ensureSessionTitle(agent, title)
+        ensureAgentPresetRecord(agent)
+        await attachToWorkspace(sessionId, ar.agentCwd)
+        loggerRef?.info?.('[mira_qqbot] 已恢复 agent 会话 ' + sessionId + '（' + chatId + '）')
+      } catch (e) {
+        const detail = e && e.stack ? e.stack : String(e)
+        if (attempt === 0) {
+          loggerRef?.warn?.('[mira_qqbot] 恢复会话失败，重试一次 ' + persistedId + '（' + chatId + '）：' + detail)
+        } else {
+          loggerRef?.warn?.('[mira_qqbot] 恢复会话失败 ' + persistedId + '（' + chatId + '），将新建会话：' + detail)
+        }
+      }
+    }
+  }
+
+  // ── 新建独立 dsh 会话（延用宿主 agent 机制与默认预设） ──
+  if (!agent) {
+    await withMetaLock(async () => {
+      // 等待锁期间可能已被并发的同一 chatId 处理完成（双检，避免重复新建）
+      const again = agentSessions.get(chatId)
+      if (again && again.agent) {
+        agent = again.agent
+        sessionId = again.sessionId
+        return
+      }
+      const newId = 'qq-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)
+      const h = await svc.create({
+        sessionId: newId,
         ...(Object.keys(agentOptions).length ? { agentOptions } : {}),
+        meta: {
+          // 关键：指定工作目录，会话归属工作空间（GUI 刷新不丢）；header 记录 preset
+          ...(ar.agentCwd ? { cwd: ar.agentCwd } : {}),
+          agentPreset: presetId,
+        },
         setup: presetSetup,
       })
       agent = h.agent
       ensureSessionTitle(agent, title)
       ensureAgentPresetRecord(agent)
-      await attachToWorkspace(sessionId, ar.agentCwd)
-      loggerRef?.info?.('[mira_qqbot] 已恢复 agent 会话 ' + sessionId + '（' + chatId + '）')
-    } catch (e) {
-      loggerRef?.warn?.('[mira_qqbot] 恢复会话失败 ' + sessionId + '：' + (e && e.message ? e.message : String(e)))
-    }
-  }
-  if (!agent) {
-    // 新建独立 dsh 会话（延用宿主 agent 机制与默认预设）
-    const newId = 'qq-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)
-    const h = await svc.create({
-      sessionId: newId,
-      ...(Object.keys(agentOptions).length ? { agentOptions } : {}),
-      meta: {
-        // 关键：指定工作目录，会话归属工作空间（GUI 刷新不丢）；header 记录 preset
-        ...(ar.agentCwd ? { cwd: ar.agentCwd } : {}),
-        agentPreset: presetId,
-      },
-      setup: presetSetup,
+      await attachToWorkspace(newId, ar.agentCwd)
+      // 锁内重新读最新映射再写，避免覆盖并发新建的其他会话的绑定
+      const freshMeta = loadAgentMeta()
+      freshMeta[chatId] = newId
+      saveAgentMeta(freshMeta)
+      sessionId = newId
+      loggerRef?.info?.('[mira_qqbot] 已创建 agent 会话 ' + newId + '（' + chatId + '）' + (ar.agentCwd ? '，工作目录 ' + ar.agentCwd : '，未指定 cwd（会话可能不在界面显示）'))
     })
-    agent = h.agent
-    ensureSessionTitle(agent, title)
-    ensureAgentPresetRecord(agent)
-    await attachToWorkspace(newId, ar.agentCwd)
-    meta[chatId] = newId
-    saveAgentMeta(meta)
-    loggerRef?.info?.('[mira_qqbot] 已创建 agent 会话 ' + newId + '（' + chatId + '）' + (ar.agentCwd ? '，工作目录 ' + ar.agentCwd : '，未指定 cwd（会话可能不在界面显示）'))
   }
-  agentSessions.set(chatId, { agent, sessionId: agent ? (meta[chatId]) : '' })
+
+  agentSessions.set(chatId, { agent, sessionId: sessionId || '' })
   return agent
 }
 
@@ -882,9 +921,11 @@ async function handleAutoReply(data) {
       try { await entry.agent.dispose?.() } catch { /* 忽略 */ }
     }
     agentSessions.delete(chatId)
-    const meta = loadAgentMeta()
-    delete meta[chatId]
-    saveAgentMeta(meta)
+    await withMetaLock(async () => {
+      const meta = loadAgentMeta()
+      delete meta[chatId]
+      saveAgentMeta(meta)
+    })
     loggerRef?.info?.('[mira_qqbot] agent 会话已重置 ' + chatId)
     try {
       await sendReply(data, '新会话已开启~ 重新认识一下吧！(◕ᴗ◕✿)')
@@ -1208,6 +1249,9 @@ export function apply(ctx, config) {
 
   // 日志里能看出插件加载成功与自动应答状态
   const ar = cfg.autoReply || {}
+  if (ar.enabled && !ar.agentCwd) {
+    loggerRef?.warn?.('[mira_qqbot] 自动应答已启用但未配置 autoReply.agentCwd：chatId→sessionId 映射将不会持久化，每次重启都会丢失绑定、新建会话。请把 agentCwd 指向你的 DSH 工作空间')
+  }
   const mode = ar.enabled
     ? '，自动应答已启用（DSH agent 机制模式' + (agentsSvc ? '' : '，但 agents 服务不可用！') + '）'
     : '，自动应答未启用'
