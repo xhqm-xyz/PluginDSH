@@ -1,6 +1,6 @@
 {
   "name": "mira_qqbot",
-  "version": "1.13.1",
+  "version": "1.14.0",
   "description": "DSH QQ 接管插件：通过 OneBot v11（NapCat）连接本机个人 QQ，向 DSH agent 暴露收发消息 / 好友 / 群 / 成员管理等 MCP 工具；内置按聊天对象独立 DSH agent 会话的自动应答（预设挂载、自定义会话标题、持久化、/new 重置、事件驱动自动唤醒）",
   "type": "module",
   "main": "lib/index.js",
